@@ -136,8 +136,9 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
             viewPatches, viewColors = self.getViewPatches(full_name, tf)
             self.body_fill_dict[full_name] = []
             for patch, color in zip(viewPatches, viewColors):
+                patch_proj = np.dot(self.Tview, patch)
                 self.body_fill_dict[full_name] += self.ax.fill(
-                    patch[0, :], patch[1, :], zorder=0, edgecolor='k',
+                    patch_proj[0, :], patch_proj[1, :], zorder=0, edgecolor='k',
                     facecolor=color, closed=True)
 
     def buildViewPatches(self, use_random_colors):
@@ -183,18 +184,21 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
 
                     # Draw a bounding box.
                     patch = np.vstack((
-                        geom.float_data[0]/2.*np.array([1, 1, 1, 1, -1, -1, -1, -1]),
-                        geom.float_data[1]/2.*np.array([1, 1, 1, 1, -1, -1, -1, -1]),
-                        geom.float_data[2]/2.*np.array([1, 1, -1, -1, -1, -1, 1, 1])))
+                        geom.float_data[0]/2.*np.array([-1, -1, 1, 1, -1, -1, 1, 1]),
+                        geom.float_data[1]/2.*np.array([-1, 1, -1, 1, -1, 1, -1, 1]),
+                        geom.float_data[2]/2.*np.array([-1, -1, -1, -1, 1, 1, 1, 1])))
 
                 elif geom.type == geom.SPHERE:
                     assert geom.num_float_data == 1
                     radius = geom.float_data[0]
-                    sample_pts = np.arange(0., 2.*math.pi, 0.25)
-                    patch = np.vstack([math.cos(pt)*self.Tview[0, 0:3]
-                                       + math.sin(pt)*self.Tview[1, 0:3]
-                                       for pt in sample_pts])
-                    patch = np.transpose(patch)
+                    lati, longi = np.meshgrid(np.arange(0., 2.*math.pi, 0.5),
+                                              np.arange(0., 2.*math.pi, 0.5))
+                    lati = lati.ravel()
+                    longi = longi.ravel()
+                    patch = np.vstack([
+                        np.sin(longi)*np.cos(lati),
+                        np.sin(longi)*np.sin(lati),
+                        np.cos(lati)])
                     patch *= radius
 
                 elif geom.type == geom.CYLINDER:
@@ -206,27 +210,25 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
 
                     # https://github.com/RobotLocomotion/drake/blob/last_sha_with_original_matlab/drake/matlab/systems/plants/RigidBodyCylinder.m
 
-                    # I don't have access to the body to world transform
-                    # yet; decide between drawing a box and circle assuming the
-                    # T_body_to_world is will not rotate us out of the
-                    # viewing plane.
-                    z_axis = np.matmul(self.Tview[0:2,0:3],
-                        element_local_tf.multiply([0, 0, 1]))
-                    if np.linalg.norm(z_axis) < 0.01:
-                        # Draw a circle.
-                        sample_pts = np.arange(0., 2.*math.pi, 0.25)
-                        patch = np.vstack([math.cos(pt)*self.Tview[0, 0:3]
-                                           + math.sin(pt)*self.Tview[1, 0:3]
-                                           for pt in sample_pts])
-                        patch = np.transpose(patch)
-                        patch *= radius
-                    else:
-                        # Draw a bounding box.
-                        patch = np.vstack((
-                            radius*np.array([1, 1, 1, 1, -1, -1, -1, -1]),
-                            radius*np.array([1, 1, 1, 1, -1, -1, -1, -1]),
-                            (length/2)*np.array([1, 1, -1, -1, -1, -1, 1, 1])))
+                    # Two circles: one at bottom, one at top.
+                    sample_pts = np.arange(0., 2.*math.pi, 0.25)
+                    patch = np.hstack(
+                        [np.array([
+                            [radius*math.cos(pt),
+                            radius*math.sin(pt),
+                             -length/2.],
+                            [radius*math.cos(pt),
+                             radius*math.sin(pt),
+                             length/2.]]).T
+                         for pt in sample_pts])
 
+                elif geom.type == geom.MESH:
+                    import trimesh
+                    mesh = trimesh.load(geom.string_data)
+                    patch = mesh.vertices.T
+                    # Apply scaling
+                    for i in range(3):
+                        patch[i, :] *= geom.float_data[i]
                 else:
                     print("UNSUPPORTED GEOMETRY TYPE {} IGNORED".format(
                         geom.type))
@@ -235,7 +237,7 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
                 patch = np.vstack((patch, np.ones((1, patch.shape[1]))))
                 patch = np.dot(element_local_tf.GetAsMatrix4(), patch)
                 # Project into 2D
-                patch = np.dot(self.Tview, patch)
+                # patch = np.dot(self.Tview, patch)
 
                 # Close path if not closed
                 if (patch[:, -1] != patch[:, 0]).any():
@@ -253,8 +255,8 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
     def getViewPatches(self, full_name, tf):
         ''' Pulls out the view patch verts for the given body index after
             applying the appropriate TF '''
-        projected_tf = np.dot(np.dot(self.Tview, tf), self.Tview_pinv)
-        transformed_patches = [np.dot(projected_tf, patch)[0:2]
+        #projected_tf = np.dot(np.dot(self.Tview, tf), self.Tview_pinv)
+        transformed_patches = [np.dot(tf, patch)
                                for patch in self.viewPatches[full_name]]
         colors = self.viewPatchColors[full_name]
         return (transformed_patches, colors)
@@ -276,7 +278,16 @@ class PlanarMultibodyVisualizer(PyPlotVisualizer):
                 full_name,
                 pose_bundle.get_pose(frame_i).matrix())
             for i, patch in enumerate(viewPatches):
-                self.body_fill_dict[full_name][i].get_path().vertices[:, :] = np.transpose(patch)  # noqa
+                patch_proj = np.dot(self.Tview, patch)[0:2, :]
+                if patch_proj.shape[1] > 3:
+                    hull = sp.spatial.ConvexHull(
+                        np.transpose(patch_proj[0:2, :]))
+                    patch_proj = np.transpose(
+                        np.vstack([patch_proj[:, v] for v in hull.vertices]))
+                # patch_proj[:, -1] = patch_proj[:, 0]
+                n_verts = self.body_fill_dict[full_name][i].get_path().vertices.shape[0]
+                patch_proj = np.pad(patch_proj, ((0, 0), (0, n_verts - patch_proj.shape[1])), mode="edge")
+                self.body_fill_dict[full_name][i].get_path().vertices[:, :] = np.transpose(patch_proj)  # noqa
 
         if isinstance(context, Context):
             self.ax.set_title('t = {:.1f}'.format(context.get_time()))
